@@ -318,6 +318,7 @@ input{font-family:'Tajawal',sans-serif;outline:none;}
 #cel-photo{
   position:absolute;top:0;left:0;width:100%;height:100%;
   object-fit:cover;transform-origin:center center;
+  /* Must match editor-img exactly */
 }
 #cel-name{display:none;}
 .cel-actions{
@@ -512,76 +513,19 @@ zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('
 photoInput.addEventListener('change', e => handleFiles(e.target.files));
 cameraInput.addEventListener('change', e => handleFiles(e.target.files));
 
-function getExifOrientation(buffer) {
-  const view = new DataView(buffer);
-  if (view.getUint16(0, false) !== 0xFFD8) return 1;
-  let offset = 2;
-  while (offset < view.byteLength) {
-    const marker = view.getUint16(offset, false);
-    offset += 2;
-    if (marker === 0xFFE1) {
-      if (view.getUint32(offset += 2, false) !== 0x45786966) return 1;
-      const little = view.getUint16(offset += 6, false) === 0x4949;
-      offset += view.getUint32(offset + 4, little);
-      const tags = view.getUint16(offset, little);
-      offset += 2;
-      for (let i = 0; i < tags; i++) {
-        if (view.getUint16(offset + i * 12, little) === 0x0112)
-          return view.getUint16(offset + i * 12 + 8, little);
-      }
-    } else if ((marker & 0xFF00) !== 0xFF00) break;
-    else offset += view.getUint16(offset, false);
-  }
-  return 1;
-}
-
 function handleFiles(files) {
-  if (!files[0]) return;
-  if (!files[0].type.startsWith('image/')) { alert('يرجى اختيار صورة صحيحة'); return; }
-  const file = files[0];
-  const MAX_SIZE = 1400;
-  const bufReader = new FileReader();
-  bufReader.onload = function(e1) {
-    const orientation = getExifOrientation(e1.target.result);
-    const urlReader = new FileReader();
-    urlReader.onload = function(e2) {
-      const img = new Image();
-      img.onload = function() {
-        let w = img.width, h = img.height;
-        if (w > MAX_SIZE || h > MAX_SIZE) {
-          if (w > h) { h = Math.round(h * MAX_SIZE / w); w = MAX_SIZE; }
-          else { w = Math.round(w * MAX_SIZE / h); h = MAX_SIZE; }
-        }
-        const c = document.createElement('canvas');
-        const ctx = c.getContext('2d');
-        if (orientation >= 5) { c.width = h; c.height = w; }
-        else { c.width = w; c.height = h; }
-        switch(orientation) {
-          case 2: ctx.transform(-1,0,0,1,c.width,0); break;
-          case 3: ctx.transform(-1,0,0,-1,c.width,c.height); break;
-          case 4: ctx.transform(1,0,0,-1,0,c.height); break;
-          case 5: ctx.transform(0,1,1,0,0,0); break;
-          case 6: ctx.transform(0,1,-1,0,c.height,0); break;
-          case 7: ctx.transform(0,-1,-1,0,c.height,c.width); break;
-          case 8: ctx.transform(0,-1,1,0,0,c.width); break;
-          default: break;
-        }
-        if (orientation >= 5) ctx.drawImage(img, 0, 0, h, w);
-        else ctx.drawImage(img, 0, 0, w, h);
-        const fixedDataUrl = c.toDataURL('image/jpeg', 0.92);
-        uploadedImage = fixedDataUrl;
-        imgState.originalImage = fixedDataUrl;
-        document.getElementById('preview-img').src = fixedDataUrl;
-        document.getElementById('drop-placeholder').classList.add('hidden');
-        document.getElementById('drop-preview').classList.remove('hidden');
-      };
-      img.src = e2.target.result;
-    };
-    urlReader.readAsDataURL(file);
+  if(!files[0]) return;
+  if(!files[0].type.startsWith('image/')) { alert('يرجى اختيار صورة صحيحة'); return; }
+  const reader = new FileReader();
+  reader.onload = e => {
+    uploadedImage = e.target.result;
+    imgState.originalImage = uploadedImage;
+    document.getElementById('preview-img').src = uploadedImage;
+    document.getElementById('drop-placeholder').classList.add('hidden');
+    document.getElementById('drop-preview').classList.remove('hidden');
   };
-  bufReader.readAsArrayBuffer(file);
+  reader.readAsDataURL(files[0]);
 }
-
 
 document.getElementById('remove-photo').addEventListener('click', e => {
   e.stopPropagation();
@@ -684,7 +628,21 @@ function resetImage() {
 function goToCelebration() {
   const celPhoto = document.getElementById('cel-photo');
   celPhoto.src = imgState.originalImage;
-  celPhoto.style.transform = `translate(${imgState.panX}px,${imgState.panY}px) scale(${imgState.zoom})`;
+
+  // Scale pan values: editor zone vs final frame zone may have different pixel sizes
+  const editorZone = document.getElementById('editor-photo-zone');
+  const gradFrame  = document.getElementById('grad-frame');
+  const editorW = editorZone ? editorZone.getBoundingClientRect().width  : 1;
+  const frameW  = gradFrame  ? gradFrame.getBoundingClientRect().width   : 1;
+  // frame zone width = frameW * 0.257 (same CSS %)
+  const editorZoneW = editorW;
+  const frameZoneW  = frameW * 0.257;
+  const scale = editorZoneW > 0 ? frameZoneW / editorZoneW : 1;
+
+  const scaledPanX = imgState.panX * scale;
+  const scaledPanY = imgState.panY * scale;
+
+  celPhoto.style.transform = `translate(${scaledPanX}px,${scaledPanY}px) scale(${imgState.zoom})`;
   celPhoto.style.transformOrigin = 'center center';
   document.getElementById('editor-section').classList.add('hidden');
   document.getElementById('cel-section').classList.remove('hidden');
@@ -725,20 +683,65 @@ function launchConfetti() {
   }
 }
 
-// ── Download ──
+// ── Download — pure Canvas ──
 async function downloadCard() {
   const btn = document.getElementById('download-btn');
   const orig = btn.innerHTML;
   btn.innerHTML = '<span>جاري التجهيز...</span>';
   btn.disabled = true;
   try {
-    const frame = document.getElementById('grad-frame');
-    const canvas = await html2canvas(frame, {useCORS:true,scale:2,backgroundColor:null,logging:false,allowTaint:true});
+    const OUT_W = 864, OUT_H = 1224;
+    const canvas = document.createElement('canvas');
+    canvas.width = OUT_W; canvas.height = OUT_H;
+    const ctx = canvas.getContext('2d');
+
+    // Zone geometry (matches CSS: top:43.6%, left:62.6% center, w:25.7%, h:18.1%)
+    const zoneW = OUT_W * 0.257;
+    const zoneH = OUT_H * 0.181;
+    const cx = OUT_W * 0.626;
+    const cy = OUT_H * 0.436 + zoneH / 2;
+    const r  = Math.min(zoneW, zoneH) / 2;
+
+    // Load user photo
+    const userImg = new Image();
+    userImg.src = imgState.originalImage;
+    await new Promise(res => { userImg.onload = res; userImg.onerror = res; });
+
+    // Scale pan from editor coords to canvas coords
+    const editorZone = document.getElementById('editor-photo-zone');
+    const editorZoneW = editorZone ? editorZone.getBoundingClientRect().width : zoneW;
+    const sf = editorZoneW > 0 ? zoneW / editorZoneW : 1;
+    const panX = imgState.panX * sf;
+    const panY = imgState.panY * sf;
+    const zoom = imgState.zoom;
+
+    // Draw photo clipped to circle
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI*2);
+    ctx.clip();
+    const iw = userImg.naturalWidth || userImg.width;
+    const ih = userImg.naturalHeight || userImg.height;
+    const bs = Math.max(zoneW/iw, zoneH/ih) * zoom;
+    ctx.drawImage(userImg, cx - iw*bs/2 + panX, cy - ih*bs/2 + panY, iw*bs, ih*bs);
+    ctx.restore();
+
+    // Draw frame on top
+    const frameSrc = document.querySelector('.frame-image-bg')?.src
+                  || document.querySelector('#editor-frame-overlay')?.src;
+    if (frameSrc) {
+      const fImg = new Image();
+      fImg.src = frameSrc;
+      await new Promise(res => { fImg.onload = res; fImg.onerror = res; });
+      ctx.drawImage(fImg, 0, 0, OUT_W, OUT_H);
+    }
+
     const link = document.createElement('a');
     link.download = 'Graduation_2026.png';
     link.href = canvas.toDataURL('image/png');
     link.click();
   } catch(e) {
+    console.error(e);
     alert('حدث خطأ، حاول مرة أخرى');
   } finally {
     btn.innerHTML = orig;
